@@ -26,16 +26,42 @@
   .store .name { font-weight:bold; }
   .store .addr { font-size:.8rem; color:#6b645c; }
   .store .date { font-size:.75rem; color:var(--accent); }
-  details { margin-top:12px; font-size:.85rem; }
-  details input { width:100%; margin:3px 0; padding:5px; }
-  details button { padding:6px 10px; }
+  header { position:relative; }
+  .hr { display:flex; align-items:center; gap:10px; }
+  #menu-btn { background:transparent; color:#fff; border:1px solid rgba(255,255,255,.6); border-radius:6px; font-size:1.3rem; line-height:1; padding:4px 10px; cursor:pointer; }
+  #menu { position:fixed; top:52px; right:8px; z-index:2000; width:min(340px, calc(100vw - 16px)); max-height:calc(100vh - 64px); overflow-y:auto; background:var(--card); border:1px solid var(--line); border-radius:10px; box-shadow:0 6px 24px rgba(0,0,0,.25); padding:6px 14px 12px; font-size:.85rem; }
+  #menu[hidden] { display:none; }
+  #menu h2 { font-size:.95rem; margin:12px 0 4px; }
+  #menu p { margin:4px 0 8px; color:#6b645c; }
+  #menu input:not([hidden]) { width:100%; margin:3px 0; padding:7px; font-size:1rem; }
+  #menu button { padding:7px 12px; margin-right:4px; }
   .pin { width:22px; height:22px; border-radius:50% 50% 50% 0; transform:rotate(-45deg); border:2px solid #fff; box-shadow:0 1px 4px rgba(0,0,0,.4); }
   .pin.todo { background:#888; } .pin.done { background:var(--accent); }
   @media (max-width:700px) { main { flex-direction:column-reverse; } #side { width:100%; max-width:none; height:45%; border-right:0; } }
 </style>
 </head>
 <body>
-<header><h1>📖 御書印マップ</h1><span id="count"></span></header>
+<header>
+  <h1>📖 御書印マップ</h1>
+  <div class="hr"><span id="count"></span><button id="menu-btn" aria-label="メニュー" aria-expanded="false" aria-controls="menu">☰</button></div>
+</header>
+<div id="menu" hidden>
+  <section>
+    <h2>バックアップ</h2>
+    <p>ブラウザのデータを消すと記録も消えます。時々「書き出し」でファイルに保存しておくと、「読み込み」で復元できます。</p>
+    <button id="export">書き出し</button>
+    <button id="import">読み込み</button>
+    <input type="file" id="import-file" accept="application/json,.json" hidden>
+  </section>
+  <section>
+    <h2>書店を追加（CSV）</h2>
+    <p>1行目に「書店名,住所,緯度,経度」の見出しを付けたCSVを選びます。緯度・経度が空の行は、住所から自動で探します（住所が必要です）。</p>
+    <button id="csv-btn">CSVを選ぶ</button>
+    <a href="#" id="csv-tpl">ひな形をダウンロード</a>
+    <input type="file" id="csv-file" accept=".csv,text/csv" hidden>
+    <p id="csv-status" role="status"></p>
+  </section>
+</div>
 <main>
   <div id="side">
     <div class="filters">
@@ -44,20 +70,6 @@
       <button data-f="done">取得済み</button>
     </div>
     <div id="list"></div>
-    <details>
-      <summary>書店を追加（地図をクリックで座標入力）</summary>
-      <input id="n-name" placeholder="書店名">
-      <input id="n-addr" placeholder="住所">
-      <input id="n-lat" placeholder="緯度">
-      <input id="n-lng" placeholder="経度">
-      <button id="add">追加</button>
-    </details>
-    <details open>
-      <summary>端末間で共有（書き出し／読み込み）</summary>
-      <button id="export">書き出し（コピー）</button>
-      <textarea id="sync" rows="4" style="width:100%;margin:4px 0" placeholder="ここに書き出した文字列を貼り付けて「読み込み」"></textarea>
-      <button id="import">読み込み（統合）</button>
-    </details>
   </div>
   <div id="map"></div>
 </main>
@@ -125,43 +137,129 @@ function render() {
 
 document.querySelectorAll(".filters button").forEach(b => b.onclick = () => { filter = b.dataset.f; render(); });
 
-map.on("click", e => {
-  document.getElementById("n-lat").value = e.latlng.lat.toFixed(5);
-  document.getElementById("n-lng").value = e.latlng.lng.toFixed(5);
+const menu = document.getElementById("menu"), menuBtn = document.getElementById("menu-btn");
+const setMenu = open => { menu.hidden = !open; menuBtn.setAttribute("aria-expanded", open); };
+menuBtn.onclick = e => { e.stopPropagation(); setMenu(menu.hidden); };
+document.addEventListener("click", e => {
+  // 地図のクリックは座標入力に使うので、メニューは開いたままにする
+  if (!menu.hidden && !menu.contains(e.target) && !document.getElementById("map").contains(e.target)) setMenu(false);
 });
-document.getElementById("add").onclick = () => {
-  const name = document.getElementById("n-name").value.trim();
-  const lat = parseFloat(document.getElementById("n-lat").value);
-  const lng = parseFloat(document.getElementById("n-lng").value);
-  if (!name || isNaN(lat) || isNaN(lng)) { alert("書店名と座標を入力してください"); return; }
-  extra.push({ id: "x" + Date.now(), name, address: document.getElementById("n-addr").value.trim(), lat, lng });
+document.addEventListener("keydown", e => { if (e.key === "Escape") setMenu(false); });
+
+// ---- CSVから書店を追加 ----
+function parseCSV(text) {
+  const rows = []; let row = [], cur = "", q = false;
+  text = text.replace(/^﻿/, "");
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else q = false; }
+      else cur += c;
+    } else if (c === '"') q = true;
+    else if (c === ",") { row.push(cur); cur = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(cur); cur = "";
+      if (row.some(v => v.trim() !== "")) rows.push(row);
+      row = [];
+    } else cur += c;
+  }
+  row.push(cur);
+  if (row.some(v => v.trim() !== "")) rows.push(row);
+  return rows;
+}
+function decodeCSV(buf) {
+  try { return new TextDecoder("utf-8", { fatal: true }).decode(buf); }
+  catch { return new TextDecoder("shift_jis").decode(buf); }   // Excel保存のCSV
+}
+async function geocode(addr) {
+  try {
+    const r = await fetch("https://msearch.gsi.go.jp/address-search/AddressSearch?q=" + encodeURIComponent(addr));
+    const d = await r.json();
+    if (d[0]) { const [lng, lat] = d[0].geometry.coordinates; return { lat: +lat.toFixed(5), lng: +lng.toFixed(5) }; }
+  } catch {}
+  return null;
+}
+const csvStatus = document.getElementById("csv-status");
+document.getElementById("csv-btn").onclick = () => document.getElementById("csv-file").click();
+document.getElementById("csv-tpl").onclick = e => {
+  e.preventDefault();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob(["﻿書店名,住所,緯度,経度\r\nサンプル書店,東京都千代田区丸の内1-1,35.6812,139.7671\r\n住所だけの書店,東京都千代田区神田神保町1-1,,\r\n"], { type: "text/csv" }));
+  a.download = "goshoin-stores-template.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+};
+document.getElementById("csv-file").onchange = async e => {
+  const f = e.target.files[0]; e.target.value = "";
+  if (!f) return;
+  const rows = parseCSV(decodeCSV(await f.arrayBuffer()));
+  const head = (rows[0] || []).map(h => h.trim());
+  const col = names => head.findIndex(h => names.includes(h));
+  const iName = col(["書店名", "店名", "店舗名称", "name"]), iAddr = col(["住所", "address"]),
+        iLat = col(["緯度", "lat", "latitude"]), iLng = col(["経度", "lng", "lon", "longitude"]),
+        iPref = col(["都道府県"]), iCity = col(["市町村名"]), iReg = col(["登録番"]);
+  if (iName < 0) { csvStatus.textContent = "1行目に「書店名」の見出しが必要です。ひな形を参考にしてください。"; return; }
+  const data = rows.slice(1);
+  const nfkc = s => (s || "").normalize("NFKC").trim();
+  const known = new Set(stores().map(s => s.name + "|" + (s.address || "")));
+  const knownIds = new Set(stores().map(s => s.id));
+  let added = 0, dup = 0, closed = 0, approx = 0; const bad = [];
+  for (let i = 0; i < data.length; i++) {
+    const r = data[i], name = nfkc(r[iName]);
+    csvStatus.textContent = `処理中… ${i + 1} / ${data.length}`;
+    if (!name) continue;
+    if (/閉店|受付停止|受付終了/.test(name)) { closed++; continue; }
+    const pref = iPref >= 0 ? nfkc(r[iPref]) : "", city = iCity >= 0 ? nfkc(r[iCity]) : "";
+    let address = iAddr >= 0 ? nfkc(r[iAddr]).split(/\s+/)[0] : "";   // 「店内」等の補足を除く
+    if (address && pref && !address.startsWith(pref)) address = pref + address;
+    const reg = iReg >= 0 ? nfkc(r[iReg]) : "";
+    const id = reg ? "r" + reg : "x" + Date.now() + "_" + i;
+    if (knownIds.has(id) || known.has(name + "|" + address)) { dup++; continue; }
+    let lat = iLat >= 0 ? parseFloat(r[iLat]) : NaN, lng = iLng >= 0 ? parseFloat(r[iLng]) : NaN;
+    let isApprox = false;
+    if (isNaN(lat) || isNaN(lng)) {
+      let g = address ? await geocode(address) : null;
+      if (!g && (pref || city)) { g = await geocode(pref + city); isApprox = !!g; }   // 住所で見つからなければ市町村の位置
+      if (!g) { bad.push(name); continue; }
+      ({ lat, lng } = g);
+      await new Promise(r => setTimeout(r, 100));
+    }
+    const s = { id, name, address: address || pref + city, lat, lng };
+    if (isApprox) { s.approx = true; approx++; }
+    extra.push(s);
+    known.add(name + "|" + address); knownIds.add(id); added++;
+  }
   save(KEY_EXTRA, extra);
-  ["n-name","n-addr","n-lat","n-lng"].forEach(i => document.getElementById(i).value = "");
   render();
+  csvStatus.textContent = `${added}件を追加しました` + (dup ? `（重複 ${dup}件はスキップ）` : "") +
+    (closed ? `、閉店 ${closed}件は除外` : "") + (approx ? `、位置が概算 ${approx}件` : "") +
+    (bad.length ? `。位置が分からず追加できなかった店: ${bad.slice(0, 5).join("、")}${bad.length > 5 ? ` ほか${bad.length - 5}件` : ""}` : "");
 };
 
-document.getElementById("export").onclick = async () => {
-  const ta = document.getElementById("sync");
-  ta.value = JSON.stringify({ v: 1, checked, extra });
-  ta.select();
-  try { await navigator.clipboard.writeText(ta.value); alert("コピーしました。もう一方の端末で貼り付けて読み込んでください。"); }
-  catch { alert("文字列を長押し／選択してコピーしてください。"); }
+document.getElementById("export").onclick = () => {
+  const data = { version: 1, exportedAt: new Date().toISOString(), checked, extra };
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+  a.download = `goshoin-backup-${new Date().toISOString().slice(0,10)}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 };
-document.getElementById("import").onclick = () => {
+document.getElementById("import").onclick = () => document.getElementById("import-file").click();
+document.getElementById("import-file").onchange = async e => {
+  const f = e.target.files[0]; e.target.value = "";
+  if (!f) return;
   try {
-    const d = JSON.parse(document.getElementById("sync").value);
-    if (!d || typeof d.checked !== "object") throw 0;
-    // 統合：チェックは両方を残し、同じ店は古い日付を採用。追加書店はidで重複排除
-    for (const [id, date] of Object.entries(d.checked)) {
-      if (!checked[id] || date < checked[id]) checked[id] = date;
-    }
-    const have = new Set(extra.map(s => s.id));
-    (d.extra || []).forEach(s => { if (!have.has(s.id)) extra.push(s); });
+    const d = JSON.parse(await f.text());
+    if (!d || typeof d.checked !== "object" || Array.isArray(d.checked)) throw new Error("bad");
+    const ex = Array.isArray(d.extra) ? d.extra.filter(s => s && s.id && s.name && isFinite(s.lat) && isFinite(s.lng)) : [];
+    if (!confirm(`取得 ${Object.keys(d.checked).length} 件、追加書店 ${ex.length} 件を読み込みます。現在の記録とマージします。`)) return;
+    Object.entries(d.checked).forEach(([k, v]) => { if (!checked[k]) checked[k] = String(v); });
+    ex.forEach(s => { if (!extra.some(x => x.id === s.id)) extra.push({ id: String(s.id), name: String(s.name), address: String(s.address || ""), lat: +s.lat, lng: +s.lng }); });
     save(KEY_CHECK, checked); save(KEY_EXTRA, extra);
     render();
-    alert("読み込みました。");
-  } catch { alert("読み込めませんでした。書き出した文字列をそのまま貼り付けてください。"); }
+  } catch { alert("読み込めませんでした。書き出したJSONファイルを選んでください。"); }
 };
+try { navigator.storage?.persist?.(); } catch {}
 
 render();
 const pts = stores().map(s => [s.lat, s.lng]);
