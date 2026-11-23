@@ -52,6 +52,12 @@
       <input id="n-lng" placeholder="経度">
       <button id="add">追加</button>
     </details>
+    <details open>
+      <summary>端末間で共有（書き出し／読み込み）</summary>
+      <button id="export">書き出し（コピー）</button>
+      <textarea id="sync" rows="4" style="width:100%;margin:4px 0" placeholder="ここに書き出した文字列を貼り付けて「読み込み」"></textarea>
+      <button id="import">読み込み（統合）</button>
+    </details>
   </div>
   <div id="map"></div>
 </main>
@@ -132,6 +138,29 @@ document.getElementById("add").onclick = () => {
   save(KEY_EXTRA, extra);
   ["n-name","n-addr","n-lat","n-lng"].forEach(i => document.getElementById(i).value = "");
   render();
+};
+
+document.getElementById("export").onclick = async () => {
+  const ta = document.getElementById("sync");
+  ta.value = JSON.stringify({ v: 1, checked, extra });
+  ta.select();
+  try { await navigator.clipboard.writeText(ta.value); alert("コピーしました。もう一方の端末で貼り付けて読み込んでください。"); }
+  catch { alert("文字列を長押し／選択してコピーしてください。"); }
+};
+document.getElementById("import").onclick = () => {
+  try {
+    const d = JSON.parse(document.getElementById("sync").value);
+    if (!d || typeof d.checked !== "object") throw 0;
+    // 統合：チェックは両方を残し、同じ店は古い日付を採用。追加書店はidで重複排除
+    for (const [id, date] of Object.entries(d.checked)) {
+      if (!checked[id] || date < checked[id]) checked[id] = date;
+    }
+    const have = new Set(extra.map(s => s.id));
+    (d.extra || []).forEach(s => { if (!have.has(s.id)) extra.push(s); });
+    save(KEY_CHECK, checked); save(KEY_EXTRA, extra);
+    render();
+    alert("読み込みました。");
+  } catch { alert("読み込めませんでした。書き出した文字列をそのまま貼り付けてください。"); }
 };
 
 render();
