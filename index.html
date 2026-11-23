@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>御書印マップ</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
+<style>
+  :root { --bg:#faf7f2; --fg:#2b2622; --accent:#b3392f; --line:#e2dbd0; --card:#fff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Hiragino Sans","Yu Gothic",sans-serif; background:var(--bg); color:var(--fg); display:flex; flex-direction:column; height:100vh; }
+  header { padding:10px 16px; background:var(--accent); color:#fff; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px; }
+  header h1 { margin:0; font-size:1.1rem; }
+  main { flex:1; display:flex; min-height:0; }
+  #side { width:340px; max-width:45%; overflow-y:auto; border-right:1px solid var(--line); padding:10px; }
+  #map { flex:1; }
+  .filters { display:flex; gap:6px; margin-bottom:8px; }
+  .filters button { flex:1; padding:6px; border:1px solid var(--line); background:var(--card); border-radius:6px; cursor:pointer; }
+  .filters button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .store { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin-bottom:8px; display:flex; gap:8px; align-items:flex-start; }
+  .store.done { background:#eef6ee; }
+  .store input { margin-top:4px; width:18px; height:18px; accent-color:var(--accent); }
+  .store .info { flex:1; cursor:pointer; }
+  .store .name { font-weight:bold; }
+  .store .addr { font-size:.8rem; color:#6b645c; }
+  .store .date { font-size:.75rem; color:var(--accent); }
+  details { margin-top:12px; font-size:.85rem; }
+  details input { width:100%; margin:3px 0; padding:5px; }
+  details button { padding:6px 10px; }
+  .pin { width:22px; height:22px; border-radius:50% 50% 50% 0; transform:rotate(-45deg); border:2px solid #fff; box-shadow:0 1px 4px rgba(0,0,0,.4); }
+  .pin.todo { background:#888; } .pin.done { background:var(--accent); }
+  @media (max-width:700px) { main { flex-direction:column-reverse; } #side { width:100%; max-width:none; height:45%; border-right:0; } }
+</style>
+</head>
+<body>
+<header><h1>📖 御書印マップ</h1><span id="count"></span></header>
+<main>
+  <div id="side">
+    <div class="filters">
+      <button data-f="all" class="on">すべて</button>
+      <button data-f="todo">未取得</button>
+      <button data-f="done">取得済み</button>
+    </div>
+    <div id="list"></div>
+    <details>
+      <summary>書店を追加（地図をクリックで座標入力）</summary>
+      <input id="n-name" placeholder="書店名">
+      <input id="n-addr" placeholder="住所">
+      <input id="n-lat" placeholder="緯度">
+      <input id="n-lng" placeholder="経度">
+      <button id="add">追加</button>
+    </details>
+  </div>
+  <div id="map"></div>
+</main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script src="stores.js"></script>
+<script>
+const KEY_CHECK = "goshoin.checked", KEY_EXTRA = "goshoin.extra";
+const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
+const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+
+let checked = load(KEY_CHECK, {});   // { id: "2026-11-23" }
+let extra = load(KEY_EXTRA, []);
+let filter = "all";
+const stores = () => [...window.STORES, ...extra];
+
+const map = L.map("map").setView([36, 137], 5);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  attribution: "© OpenStreetMap contributors", maxZoom: 19 }).addTo(map);
+const markers = {};
+const layer = L.markerClusterGroup({ maxClusterRadius: 50 }).addTo(map);
+
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const icon = done => L.divIcon({ className:"", html:`<div class="pin ${done?"done":"todo"}"></div>`, iconSize:[22,22], iconAnchor:[6,22] });
+
+function toggle(id, on) {
+  if (on) checked[id] = new Date().toISOString().slice(0,10); else delete checked[id];
+  save(KEY_CHECK, checked);
+  render();
+}
+
+function render() {
+  const all = stores();
+  const shown = all.filter(s => filter === "all" || (filter === "done") === !!checked[s.id]);
+  document.getElementById("count").textContent = `取得 ${all.filter(s => checked[s.id]).length} / ${all.length} 店`;
+  document.querySelectorAll(".filters button").forEach(b => b.classList.toggle("on", b.dataset.f === filter));
+
+  const list = document.getElementById("list");
+  list.innerHTML = "";
+  layer.clearLayers();
+  shown.forEach(s => {
+    const done = !!checked[s.id];
+    const el = document.createElement("div");
+    el.className = "store" + (done ? " done" : "");
+    el.innerHTML = `<input type="checkbox" ${done ? "checked" : ""}>
+      <div class="info"><div class="name">${esc(s.name)}</div><div class="addr">${esc(s.address || "")}${s.approx ? "（位置は概算）" : ""}</div>
+      ${done ? `<div class="date">受取日: ${esc(checked[s.id])}</div>` : ""}</div>`;
+    el.querySelector("input").onchange = e => toggle(s.id, e.target.checked);
+    el.querySelector(".info").onclick = () => {
+      const m = markers[s.id];
+      if (m) layer.zoomToShowLayer(m, () => { map.setView([s.lat, s.lng], Math.max(map.getZoom(), 15)); m.openPopup(); });
+    };
+    list.appendChild(el);
+
+    const m = L.marker([s.lat, s.lng], { icon: icon(done) }).addTo(layer);
+    const pop = document.createElement("div");
+    pop.innerHTML = `<b>${esc(s.name)}</b><br>${esc(s.address || "")}<br><label><input type="checkbox" ${done ? "checked" : ""}> 御書印を受け取った</label>`;
+    pop.querySelector("input").onchange = e => toggle(s.id, e.target.checked);
+    m.bindPopup(pop);
+    markers[s.id] = m;
+  });
+  Object.keys(markers).forEach(k => { if (!layer.hasLayer(markers[k])) delete markers[k]; });
+  if (!shown.length) list.textContent = "該当する書店がありません";
+}
+
+document.querySelectorAll(".filters button").forEach(b => b.onclick = () => { filter = b.dataset.f; render(); });
+
+map.on("click", e => {
+  document.getElementById("n-lat").value = e.latlng.lat.toFixed(5);
+  document.getElementById("n-lng").value = e.latlng.lng.toFixed(5);
+});
+document.getElementById("add").onclick = () => {
+  const name = document.getElementById("n-name").value.trim();
+  const lat = parseFloat(document.getElementById("n-lat").value);
+  const lng = parseFloat(document.getElementById("n-lng").value);
+  if (!name || isNaN(lat) || isNaN(lng)) { alert("書店名と座標を入力してください"); return; }
+  extra.push({ id: "x" + Date.now(), name, address: document.getElementById("n-addr").value.trim(), lat, lng });
+  save(KEY_EXTRA, extra);
+  ["n-name","n-addr","n-lat","n-lng"].forEach(i => document.getElementById(i).value = "");
+  render();
+};
+
+render();
+const pts = stores().map(s => [s.lat, s.lng]);
+if (pts.length) map.fitBounds(pts, { padding: [30, 30] });
+</script>
+</body>
+</html>
